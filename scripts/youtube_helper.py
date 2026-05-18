@@ -11,56 +11,7 @@ import json
 import subprocess
 import tempfile
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-COOKIES_JSON = os.path.join(SCRIPT_DIR, "www.youtube.com_cookies.json")
-COOKIES_TXT = os.path.join(SCRIPT_DIR, "cookies.txt")
-
-# Chrome profile paths by OS
-_CHROME_PROFILES = {
-    "Windows": os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "User Data"),
-    "Darwin":  os.path.expanduser("~/Library/Application Support/Google/Chrome"),
-    "Linux":   os.path.expanduser("~/.config/google-chrome"),
-}
-
-
-def _build_cookies_txt() -> bool:
-    """Convert browser-exported JSON cookies to Netscape format. Returns True on success."""
-    if not os.path.exists(COOKIES_JSON):
-        return False
-    with open(COOKIES_JSON, encoding="utf-8") as f:
-        cookies = json.load(f)
-    lines = ["# Netscape HTTP Cookie File\n"]
-    for c in cookies:
-        domain = c.get("domain", "")
-        subdomains = "TRUE" if domain.startswith(".") else "FALSE"
-        path = c.get("path", "/")
-        secure = "TRUE" if c.get("secure", False) else "FALSE"
-        expiry = int(c.get("expirationDate", 0))
-        lines.append(
-            f"{domain}\t{subdomains}\t{path}\t{secure}\t{expiry}"
-            f"\t{c.get('name', '')}\t{c.get('value', '')}\n"
-        )
-    with open(COOKIES_TXT, "w", encoding="utf-8") as f:
-        f.writelines(lines)
-    return True
-
-
-def get_cookie_args() -> list[str]:
-    """
-    Return yt-dlp cookie arguments using the best available method:
-    1. --cookies-from-browser chrome  (live cookies + PO token, best for avoiding blocks)
-    2. --cookies cookies.txt          (fallback from exported JSON)
-    3. []                             (no cookies)
-    """
-    import platform
-    chrome_path = _CHROME_PROFILES.get(platform.system(), "")
-    if chrome_path and os.path.isdir(chrome_path):
-        return ["--cookies-from-browser", "chrome"]
-
-    if _build_cookies_txt():
-        return ["--cookies", COOKIES_TXT]
-
-    return []
+COOKIE_ARGS = ["--cookies-from-browser", "chrome"]
 
 
 def search(query: str, max_results: int = 5) -> None:
@@ -71,7 +22,7 @@ def search(query: str, max_results: int = 5) -> None:
         "--flat-playlist",
         "--no-warnings",
         "--quiet",
-        *get_cookie_args(),
+        *COOKIE_ARGS,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     videos = []
@@ -99,14 +50,12 @@ def transcribe(url: str, model_name: str = "base") -> None:
     if not url.startswith("http"):
         url = f"https://www.youtube.com/watch?v={url}"
 
-    cookie_args = get_cookie_args()
-
     def _out(obj):
         sys.stdout.buffer.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
         sys.stdout.buffer.write(b"\n")
         sys.stdout.buffer.flush()
 
-    meta_cmd = ["yt-dlp", "--dump-json", "--no-warnings", "--quiet", *cookie_args, url]
+    meta_cmd = ["yt-dlp", "--dump-json", "--no-warnings", "--quiet", *COOKIE_ARGS, url]
     meta_result = subprocess.run(meta_cmd, capture_output=True)
     metadata = {}
     if meta_result.returncode == 0 and meta_result.stdout.strip():
@@ -122,7 +71,7 @@ def transcribe(url: str, model_name: str = "base") -> None:
             "-x", "--audio-format", "mp3", "--audio-quality", "0",
             "-o", audio_path,
             "--no-warnings", "--quiet",
-            *cookie_args,
+            *COOKIE_ARGS,
         ]
         dl_result = subprocess.run(dl_cmd, capture_output=True)
         if dl_result.returncode != 0:
