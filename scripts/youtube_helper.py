@@ -1,14 +1,17 @@
 """
-YouTube helper: search, download video, and transcribe using yt-dlp + Whisper.
+YouTube helper: search and fetch transcripts using youtube-transcript-api.
+Falls back to yt-dlp + Whisper for videos without captions.
+
 Usage:
   python youtube_helper.py search "<query>" [max_results]
   python youtube_helper.py transcribe "<url_or_id>" [whisper_model]
-  python youtube_helper.py transcribe-local "<video_file_path>" [whisper_model]
+  python youtube_helper.py transcribe-local "<audio_file_path>" [whisper_model]
 """
 
 import sys
 import os
 import json
+import re
 import subprocess
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -22,14 +25,17 @@ def _out(obj: dict) -> None:
     sys.stdout.buffer.flush()
 
 
+def _extract_video_id(url_or_id: str) -> str:
+    match = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})", url_or_id)
+    return match.group(1) if match else url_or_id
+
+
 def search(query: str, max_results: int = 5) -> None:
     cmd = [
         "yt-dlp",
         f"ytsearch{max_results}:{query}",
-        "--dump-json",
-        "--flat-playlist",
-        "--no-warnings",
-        "--quiet",
+        "--dump-json", "--flat-playlist",
+        "--no-warnings", "--quiet",
         *COOKIE_ARGS,
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
@@ -54,88 +60,144 @@ def search(query: str, max_results: int = 5) -> None:
     print(json.dumps(videos, ensure_ascii=False, indent=2))
 
 
-def download_video(url: str) -> tuple[str | None, dict]:
-    """Download video to downloads/ folder. Returns (file_path, metadata)."""
-    if not url.startswith("http"):
-        url = f"https://www.youtube.com/watch?v={url}"
+def _fetch_transcript(video_id: str) -> tuple[str, str] | tuple[None, None]:
+    """Fetch transcript via youtube-transcript-api. Returns (text, language) or (None, None)."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+    except ImportError:
+        return None, None
 
-    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+    try:
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
 
-    # Get metadata
+        # Prefer manual captions, then auto-generated; Vietnamese or English first
+        for lang in ["vi", "en"]:
+            try:
+                t = transcript_list.find_transcript([lang])
+                segments = t.fetch()
+                text = " ".join(s.text for s in segments)
+                return text, t.language_code
+            except Exception:
+                pass
+
+        # Fallback: take whatever is available
+        t = next(iter(transcript_list))
+        segments = t.fetch()
+        text = " ".join(s.text for s in segments)
+        return text, t.language_code
+
+    except (NoTranscriptFound, TranscriptsDisabled):
+        return None, None
+    except Exception:
+        return None, None
+
+
+def _fetch_metadata(url: str) -> dict:
+    """Get video metadata via yt-dlp."""
     meta_cmd = ["yt-dlp", "--dump-json", "--no-warnings", "--quiet", *COOKIE_ARGS, url]
-    meta_result = subprocess.run(meta_cmd, capture_output=True)
-    metadata = {}
-    if meta_result.returncode == 0 and meta_result.stdout.strip():
+    result = subprocess.run(meta_cmd, capture_output=True)
+    if result.returncode == 0 and result.stdout.strip():
         try:
-            metadata = json.loads(meta_result.stdout.decode("utf-8", errors="replace").strip())
+            return json.loads(result.stdout.decode("utf-8", errors="replace").strip())
         except json.JSONDecodeError:
             pass
-
-    # Download audio only — sufficient for transcription, much smaller than video
-    output_template = os.path.join(DOWNLOADS_DIR, "%(upload_date)s_%(id)s_%(title).80s.%(ext)s")
-    dl_cmd = [
-        "yt-dlp", url,
-        "-f", "bestaudio/best",
-        "-x", "--audio-format", "m4a",
-        "-o", output_template,
-        "--no-warnings",
-        "--print", "after_move:filepath",
-        *COOKIE_ARGS,
-    ]
-    dl_result = subprocess.run(dl_cmd, capture_output=True, text=True, encoding="utf-8")
-    if dl_result.returncode != 0:
-        return None, metadata
-
-    video_path = dl_result.stdout.strip().splitlines()[-1] if dl_result.stdout.strip() else None
-    if not video_path or not os.path.isfile(video_path):
-        # Fallback: find the newest audio file in downloads/
-        audio_exts = (".m4a", ".mp3", ".opus", ".webm", ".ogg")
-        files = [
-            os.path.join(DOWNLOADS_DIR, f)
-            for f in os.listdir(DOWNLOADS_DIR)
-            if f.endswith(audio_exts)
-        ]
-        video_path = max(files, key=os.path.getmtime) if files else None
-
-    return video_path, metadata
+    return {}
 
 
-def transcribe_file(video_path: str, model_name: str, metadata: dict | None = None) -> None:
-    """Transcribe a local video/audio file with Whisper and print JSON result."""
-    if not os.path.isfile(video_path):
-        _out({"error": f"File not found: {video_path}"})
-        sys.exit(1)
-
+def _whisper_transcribe(audio_path: str, model_name: str) -> tuple[str, str]:
+    """Transcribe a local file with Whisper. Returns (text, language)."""
     try:
         import whisper
     except ImportError:
         _out({"error": "openai-whisper not installed. Run: pip install openai-whisper"})
         sys.exit(1)
-
-    whisper_result = whisper.load_model(model_name).transcribe(video_path, verbose=False)
-
-    _out({
-        "title": (metadata or {}).get("title", os.path.basename(video_path)),
-        "url": (metadata or {}).get("webpage_url", ""),
-        "uploader": (metadata or {}).get("uploader", "Unknown"),
-        "duration_seconds": (metadata or {}).get("duration", 0),
-        "description": ((metadata or {}).get("description") or "")[:500],
-        "video_file": video_path,
-        "transcript": whisper_result.get("text", "").strip(),
-        "language": whisper_result.get("language", "unknown"),
-    })
+    result = whisper.load_model(model_name).transcribe(audio_path, verbose=False)
+    return result.get("text", "").strip(), result.get("language", "unknown")
 
 
 def transcribe(url: str, model_name: str = "base") -> None:
-    """Download video from URL then transcribe it."""
-    print(f"[1/2] Downloading video...", file=sys.stderr)
-    video_path, metadata = download_video(url)
-    if not video_path:
-        _out({"error": "Download failed"})
+    if not url.startswith("http"):
+        url = f"https://www.youtube.com/watch?v={url}"
+
+    video_id = _extract_video_id(url)
+
+    # Step 1: try caption API (fast, no download)
+    print("[1/2] Fetching transcript from YouTube captions...", file=sys.stderr)
+    transcript_text, lang = _fetch_transcript(video_id)
+
+    metadata = {}
+    method = "caption_api"
+
+    if transcript_text:
+        print("[1/2] Captions found.", file=sys.stderr)
+        print("[2/2] Fetching video metadata...", file=sys.stderr)
+        metadata = _fetch_metadata(url)
+        video_file = ""
+    else:
+        # Step 2: fall back to download + Whisper
+        print("[1/2] No captions available. Downloading audio for Whisper...", file=sys.stderr)
+        os.makedirs(DOWNLOADS_DIR, exist_ok=True)
+        output_template = os.path.join(DOWNLOADS_DIR, "%(upload_date)s_%(id)s_%(title).80s.%(ext)s")
+        dl_cmd = [
+            "yt-dlp", url,
+            "-f", "bestaudio/best",
+            "-x", "--audio-format", "m4a",
+            "-o", output_template,
+            "--no-warnings",
+            "--print", "after_move:filepath",
+            *COOKIE_ARGS,
+        ]
+        dl_result = subprocess.run(dl_cmd, capture_output=True, text=True, encoding="utf-8")
+        if dl_result.returncode != 0:
+            _out({"error": f"Download failed: {dl_result.stderr}"})
+            sys.exit(1)
+
+        audio_path = dl_result.stdout.strip().splitlines()[-1] if dl_result.stdout.strip() else None
+        if not audio_path or not os.path.isfile(audio_path):
+            audio_exts = (".m4a", ".mp3", ".opus", ".webm", ".ogg")
+            files = [os.path.join(DOWNLOADS_DIR, f) for f in os.listdir(DOWNLOADS_DIR) if f.endswith(audio_exts)]
+            audio_path = max(files, key=os.path.getmtime) if files else None
+
+        if not audio_path:
+            _out({"error": "Audio file not found after download"})
+            sys.exit(1)
+
+        print(f"[2/2] Transcribing with Whisper ({model_name})...", file=sys.stderr)
+        transcript_text, lang = _whisper_transcribe(audio_path, model_name)
+        metadata = _fetch_metadata(url)
+        video_file = audio_path
+        method = "whisper"
+
+    _out({
+        "title": metadata.get("title", "Unknown"),
+        "url": url,
+        "uploader": metadata.get("uploader", "Unknown"),
+        "duration_seconds": metadata.get("duration", 0),
+        "description": (metadata.get("description") or "")[:500],
+        "video_file": video_file,
+        "transcript": transcript_text,
+        "language": lang,
+        "method": method,
+    })
+
+
+def transcribe_local(file_path: str, model_name: str = "base") -> None:
+    if not os.path.isfile(file_path):
+        _out({"error": f"File not found: {file_path}"})
         sys.exit(1)
-    print(f"[1/2] Saved to: {video_path}", file=sys.stderr)
-    print(f"[2/2] Transcribing with Whisper ({model_name})...", file=sys.stderr)
-    transcribe_file(video_path, model_name, metadata)
+    print(f"Transcribing with Whisper ({model_name})...", file=sys.stderr)
+    text, lang = _whisper_transcribe(file_path, model_name)
+    _out({
+        "title": os.path.basename(file_path),
+        "url": "",
+        "uploader": "",
+        "duration_seconds": 0,
+        "description": "",
+        "video_file": file_path,
+        "transcript": text,
+        "language": lang,
+        "method": "whisper",
+    })
 
 
 def main():
@@ -150,8 +212,7 @@ def main():
     elif command == "transcribe":
         transcribe(arg, sys.argv[3] if len(sys.argv) > 3 else "base")
     elif command == "transcribe-local":
-        # Transcribe an already-downloaded local file
-        transcribe_file(arg, sys.argv[3] if len(sys.argv) > 3 else "base")
+        transcribe_local(arg, sys.argv[3] if len(sys.argv) > 3 else "base")
     else:
         print(f"Unknown command: {command}")
         sys.exit(1)
