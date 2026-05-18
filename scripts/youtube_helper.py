@@ -71,12 +71,12 @@ def download_video(url: str) -> tuple[str | None, dict]:
         except json.JSONDecodeError:
             pass
 
-    # Download video (best quality mp4, max 1080p to keep file size reasonable)
+    # Download audio only — sufficient for transcription, much smaller than video
     output_template = os.path.join(DOWNLOADS_DIR, "%(upload_date)s_%(id)s_%(title).80s.%(ext)s")
     dl_cmd = [
         "yt-dlp", url,
-        "-f", "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "--merge-output-format", "mp4",
+        "-f", "bestaudio/best",
+        "-x", "--audio-format", "m4a",
         "-o", output_template,
         "--no-warnings",
         "--print", "after_move:filepath",
@@ -88,13 +88,14 @@ def download_video(url: str) -> tuple[str | None, dict]:
 
     video_path = dl_result.stdout.strip().splitlines()[-1] if dl_result.stdout.strip() else None
     if not video_path or not os.path.isfile(video_path):
-        # Fallback: find the newest mp4 in downloads/
-        mp4s = [
+        # Fallback: find the newest audio file in downloads/
+        audio_exts = (".m4a", ".mp3", ".opus", ".webm", ".ogg")
+        files = [
             os.path.join(DOWNLOADS_DIR, f)
             for f in os.listdir(DOWNLOADS_DIR)
-            if f.endswith(".mp4")
+            if f.endswith(audio_exts)
         ]
-        video_path = max(mp4s, key=os.path.getmtime) if mp4s else None
+        video_path = max(files, key=os.path.getmtime) if files else None
 
     return video_path, metadata
 
