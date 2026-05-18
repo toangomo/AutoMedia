@@ -1,0 +1,7 @@
+scripts/cookies.txt
+scripts/cookies_converted.txt
+scripts/*.json
+summaries/
+__pycache__/
+*.pyc
+.claude/settings.local.json
