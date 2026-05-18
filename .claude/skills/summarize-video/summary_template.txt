@@ -1,0 +1,17 @@
+=== TÓM TẮT VIDEO ===
+Ngày tóm tắt : {datetime}
+Nguồn        : {url_or_file}
+Kênh/Tác giả : {uploader}
+Thời lượng   : {duration}
+Ngôn ngữ gốc : {language}
+Phương pháp  : {method}
+Model Whisper: {model}
+
+================================================================
+
+{summary}
+
+================================================================
+=== TRANSCRIPT GỐC ===
+
+{transcript}
