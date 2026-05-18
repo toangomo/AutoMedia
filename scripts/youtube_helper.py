@@ -1,17 +1,25 @@
 """
-YouTube helper: search, download audio, and transcribe using yt-dlp + Whisper.
+YouTube helper: search, download video, and transcribe using yt-dlp + Whisper.
 Usage:
   python youtube_helper.py search "<query>" [max_results]
   python youtube_helper.py transcribe "<url_or_id>" [whisper_model]
+  python youtube_helper.py transcribe-local "<video_file_path>" [whisper_model]
 """
 
 import sys
 import os
 import json
 import subprocess
-import tempfile
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+DOWNLOADS_DIR = os.path.join(os.path.dirname(SCRIPT_DIR), "downloads")
 COOKIE_ARGS = ["--cookies-from-browser", "chrome"]
+
+
+def _out(obj: dict) -> None:
+    sys.stdout.buffer.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+    sys.stdout.buffer.write(b"\n")
+    sys.stdout.buffer.flush()
 
 
 def search(query: str, max_results: int = 5) -> None:
@@ -46,15 +54,14 @@ def search(query: str, max_results: int = 5) -> None:
     print(json.dumps(videos, ensure_ascii=False, indent=2))
 
 
-def transcribe(url: str, model_name: str = "base") -> None:
+def download_video(url: str) -> tuple[str | None, dict]:
+    """Download video to downloads/ folder. Returns (file_path, metadata)."""
     if not url.startswith("http"):
         url = f"https://www.youtube.com/watch?v={url}"
 
-    def _out(obj):
-        sys.stdout.buffer.write(json.dumps(obj, ensure_ascii=False).encode("utf-8"))
-        sys.stdout.buffer.write(b"\n")
-        sys.stdout.buffer.flush()
+    os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
+    # Get metadata
     meta_cmd = ["yt-dlp", "--dump-json", "--no-warnings", "--quiet", *COOKIE_ARGS, url]
     meta_result = subprocess.run(meta_cmd, capture_output=True)
     metadata = {}
@@ -64,50 +71,75 @@ def transcribe(url: str, model_name: str = "base") -> None:
         except json.JSONDecodeError:
             pass
 
-    with tempfile.TemporaryDirectory() as tmp_dir:
-        audio_path = os.path.join(tmp_dir, "audio.%(ext)s")
-        dl_cmd = [
-            "yt-dlp", url,
-            "-x", "--audio-format", "mp3", "--audio-quality", "0",
-            "-o", audio_path,
-            "--no-warnings", "--quiet",
-            *COOKIE_ARGS,
+    # Download video (best quality mp4, max 1080p to keep file size reasonable)
+    output_template = os.path.join(DOWNLOADS_DIR, "%(upload_date)s_%(id)s_%(title).80s.%(ext)s")
+    dl_cmd = [
+        "yt-dlp", url,
+        "-f", "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--merge-output-format", "mp4",
+        "-o", output_template,
+        "--no-warnings",
+        "--print", "after_move:filepath",
+        *COOKIE_ARGS,
+    ]
+    dl_result = subprocess.run(dl_cmd, capture_output=True, text=True, encoding="utf-8")
+    if dl_result.returncode != 0:
+        return None, metadata
+
+    video_path = dl_result.stdout.strip().splitlines()[-1] if dl_result.stdout.strip() else None
+    if not video_path or not os.path.isfile(video_path):
+        # Fallback: find the newest mp4 in downloads/
+        mp4s = [
+            os.path.join(DOWNLOADS_DIR, f)
+            for f in os.listdir(DOWNLOADS_DIR)
+            if f.endswith(".mp4")
         ]
-        dl_result = subprocess.run(dl_cmd, capture_output=True)
-        if dl_result.returncode != 0:
-            _out({"error": f"Download failed: {dl_result.stderr.decode('utf-8', errors='replace')}"})
-            sys.exit(1)
+        video_path = max(mp4s, key=os.path.getmtime) if mp4s else None
 
-        mp3_file = next(
-            (os.path.join(tmp_dir, f) for f in os.listdir(tmp_dir) if f.endswith(".mp3")),
-            None,
-        )
-        if not mp3_file:
-            _out({"error": "Audio file not found after download"})
-            sys.exit(1)
+    return video_path, metadata
 
-        try:
-            import whisper
-        except ImportError:
-            _out({"error": "openai-whisper not installed. Run: pip install openai-whisper"})
-            sys.exit(1)
 
-        whisper_result = whisper.load_model(model_name).transcribe(mp3_file, verbose=False)
+def transcribe_file(video_path: str, model_name: str, metadata: dict | None = None) -> None:
+    """Transcribe a local video/audio file with Whisper and print JSON result."""
+    if not os.path.isfile(video_path):
+        _out({"error": f"File not found: {video_path}"})
+        sys.exit(1)
 
-        _out({
-            "title": metadata.get("title", "Unknown"),
-            "url": url,
-            "uploader": metadata.get("uploader", "Unknown"),
-            "duration_seconds": metadata.get("duration", 0),
-            "description": (metadata.get("description") or "")[:500],
-            "transcript": whisper_result.get("text", "").strip(),
-            "language": whisper_result.get("language", "unknown"),
-        })
+    try:
+        import whisper
+    except ImportError:
+        _out({"error": "openai-whisper not installed. Run: pip install openai-whisper"})
+        sys.exit(1)
+
+    whisper_result = whisper.load_model(model_name).transcribe(video_path, verbose=False)
+
+    _out({
+        "title": (metadata or {}).get("title", os.path.basename(video_path)),
+        "url": (metadata or {}).get("webpage_url", ""),
+        "uploader": (metadata or {}).get("uploader", "Unknown"),
+        "duration_seconds": (metadata or {}).get("duration", 0),
+        "description": ((metadata or {}).get("description") or "")[:500],
+        "video_file": video_path,
+        "transcript": whisper_result.get("text", "").strip(),
+        "language": whisper_result.get("language", "unknown"),
+    })
+
+
+def transcribe(url: str, model_name: str = "base") -> None:
+    """Download video from URL then transcribe it."""
+    print(f"[1/2] Downloading video...", file=sys.stderr)
+    video_path, metadata = download_video(url)
+    if not video_path:
+        _out({"error": "Download failed"})
+        sys.exit(1)
+    print(f"[1/2] Saved to: {video_path}", file=sys.stderr)
+    print(f"[2/2] Transcribing with Whisper ({model_name})...", file=sys.stderr)
+    transcribe_file(video_path, model_name, metadata)
 
 
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python youtube_helper.py <search|transcribe> <query_or_url> [options]")
+        print("Usage: python youtube_helper.py <search|transcribe|transcribe-local> <query_or_url_or_path> [options]")
         sys.exit(1)
 
     command, arg = sys.argv[1], sys.argv[2]
@@ -116,6 +148,9 @@ def main():
         search(arg, int(sys.argv[3]) if len(sys.argv) > 3 else 5)
     elif command == "transcribe":
         transcribe(arg, sys.argv[3] if len(sys.argv) > 3 else "base")
+    elif command == "transcribe-local":
+        # Transcribe an already-downloaded local file
+        transcribe_file(arg, sys.argv[3] if len(sys.argv) > 3 else "base")
     else:
         print(f"Unknown command: {command}")
         sys.exit(1)

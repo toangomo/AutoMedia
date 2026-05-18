@@ -59,15 +59,22 @@ Sau khi người dùng chọn, lấy URL tương ứng từ JSON rồi tiếp t�
 
 ---
 
-### Bước 4 — Tải audio và transcribe
+### Bước 4 — Tải video về máy và transcribe
 
-Chạy script transcribe (có thể mất vài phút tùy độ dài video):
+Script sẽ tải video mp4 vào `E:\Claude-Code\AutoMedia\downloads\` rồi dùng Whisper đọc trực tiếp từ file đó.
+Video được giữ lại sau khi xong (có thể tái sử dụng mà không cần tải lại).
 
 ```powershell
 python "E:\Claude-Code\AutoMedia\scripts\youtube_helper.py" transcribe "<url>" <model>
 ```
 
-Script trả về JSON gồm: `title`, `url`, `uploader`, `duration_seconds`, `description`, `transcript`, `language`.
+Nếu video đã có sẵn trong `downloads\`, dùng lệnh này để bỏ qua bước tải:
+
+```powershell
+python "E:\Claude-Code\AutoMedia\scripts\youtube_helper.py" transcribe-local "<đường_dẫn_file.mp4>" <model>
+```
+
+Script trả về JSON gồm: `title`, `url`, `uploader`, `duration_seconds`, `description`, `video_file`, `transcript`, `language`.
 
 Nếu có lỗi trong field `error`, thông báo lỗi cho người dùng và dừng.
 
@@ -121,6 +128,7 @@ Sau khi có nội dung tóm tắt hoàn chỉnh ở Bước 5:
 === TÓM TẮT VIDEO YOUTUBE ===
 Ngày tóm tắt: [datetime hiện tại]
 URL: [url]
+File video: [video_file]
 Kênh: [uploader]
 Thời lượng: [duration]
 Ngôn ngữ gốc: [language]
