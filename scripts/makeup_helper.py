@@ -140,9 +140,10 @@ def apply_makeup(image_path: str, output_dir: str | None = None) -> dict:
         image_data = base64.b64decode(response.data[0].b64_json)
         result_img = PIL.Image.open(io.BytesIO(image_data))
 
-        # Resize về đúng kích thước ảnh gốc
+        # Fit về đúng kích thước gốc: scale đều + crop giữa, không bóp méo
         if result_img.size != (orig_w, orig_h):
-            result_img = result_img.resize((orig_w, orig_h), PIL.Image.LANCZOS)
+            from PIL import ImageOps
+            result_img = ImageOps.fit(result_img, (orig_w, orig_h), PIL.Image.LANCZOS)
 
         # Giữ đúng định dạng gốc
         save_format = 'JPEG' if p.suffix.lower() in ('.jpg', '.jpeg') else 'PNG'
